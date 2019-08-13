@@ -87,6 +87,7 @@ class CNN:
 
             # Predictions
             self.logits = tf.layers.dense(flat, self.n_classes)
+            tf.identity(self.logits, name="logits")
 
             # Cost function and optimizer
             self.cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=self.logits, labels=self.labels_))
@@ -100,7 +101,6 @@ class CNN:
             self.saver = tf.train.Saver()
 
         self.session = tf.Session(graph=self.graph)
-        self.freeze_the_graph("har")
 
 
     def train_network(self):
@@ -184,17 +184,43 @@ class CNN:
         checkpoint_path = save_path + 'har.ckpt'  # complete path to the model's checkpoint file
         input_saver_def_path = ""
         input_binary = False
-        output_node_names = "labels"  # output node's name. Should match to that mentioned in your code
+        output_node_names = "logits"    # output node's name. Should match to that mentioned in your code
         restore_op_name = "save/restore_all"
         filename_tensor_name = "save/Const:0"
         output_frozen_graph_name = save_path + 'frozen_model_' + model_name + '.pb'  # the name of .pb file you would like to give
         clear_devices = True
+
         freeze_graph.freeze_graph(input_graph_path, input_saver_def_path,
                                   input_binary, checkpoint_path, output_node_names,
                                   restore_op_name, filename_tensor_name,
                                   output_frozen_graph_name, clear_devices, "")
 
+        graph_def_file = output_frozen_graph_name
 
+        input_arrays = ["inputs"]
+        output_arrays = ["logits"]
+        converter = tf.lite.TFLiteConverter.from_frozen_graph(graph_def_file, input_arrays, output_arrays)
+        #tflite_model = converter.convert()  # qui nascono i problemi!
+
+        ''' NON WORKA: Some of the operators in the model are not supported by the standard TensorFlow Lite runtime. 
+        output_arrays = ["logits"]
+        input_arrays = {"inputs", "keep"}
+        converter = tf.lite.TFLiteConverter.from_frozen_graph(graph_def_file, input_arrays, output_arrays, input_shapes={"keep":[1]})
+        tflite_model = converter.convert()     #qui nascono i problemi!
+        '''
+        #open("converted_model.tflite", "wb").write(tflite_model)
+
+        #tf.saved_model.simple_save(self.session, "./lol/", inputs={'x':self.inputs_}, outputs={"y":self.logits})
+
+        # Converting a GraphDef from session.
+        #converter = tf.lite.TFLiteConverter.from_session(self.session, self.inputs_, self.logits)
+        #tflite_model = converter.convert()
+        #open("converted_model.tflite", "wb").write(tflite_model)
+
+        #tf.lite.toco_convert(self.session.graph_def, [self.inputs_], [self.logits])
+
+        #writer = tf.summary.FileWriter('./named_scope', self.session.graph)
+        #writer.close()
 
     # Evaluate on test set
     def evaluate_on_test_set(self):
@@ -203,86 +229,104 @@ class CNN:
         with self.session as sess:
             # Restore
             self.saver.restore(sess, tf.train.latest_checkpoint('checkpoints-cnn'))
-            #print(self.graph.get_tensor_by_name('labels:0'))
-            #print(self.graph.get_tensor_by_name('inputs:0'))
-            #export_dir = "saved_model"
-            #tf.lite.TFLiteConverter.from_session(sess, self.inputs_, self.logits)
+
+            # Run through batches
             for x_t, y_t in get_batches(self.X_test, self.y_test, self.batch_size):
                 feed = {self.inputs_: x_t,
                         self.labels_: y_t,
                         self.keep_prob_: 1}
-
                 batch_acc = sess.run(self.accuracy, feed_dict=feed)
                 test_acc.append(batch_acc)
             print("Test accuracy: {:.6f}".format(np.mean(test_acc)))
 
+    def re_create_the_network_and_test(self):
+        test_acc = []
+        # Create some variables.
+        with tf.Session() as sess:
+            # Restore the network
+            new_saver = tf.train.import_meta_graph('./checkpoints-cnn/har.ckpt.meta')
+
+            # Load the parameters
+            new_saver.restore(sess, tf.train.latest_checkpoint('checkpoints-cnn'))
+            graph = tf.get_default_graph()
+
+            # Access the tensors
+            inputs = graph.get_tensor_by_name('inputs:0')
+            labels = graph.get_tensor_by_name('labels:0')
+            keep = graph.get_tensor_by_name('keep:0')
+            accuracy = graph.get_tensor_by_name('accuracy:0')
+
+            for x_t, y_t in get_batches(self.X_test, self.y_test, self.batch_size):
+                feed = {inputs: x_t,
+                        labels: y_t,
+                        keep: 1}
+                batch_acc = sess.run(accuracy, feed_dict=feed)
+                test_acc.append(batch_acc)
+            print("Test accuracy2: {:.6f}".format(np.mean(test_acc)))
+
+    def re_create_network_from_frozen_graph(self, frozen_graph_filename):
+        print("--- Accessing {} --- ".format(frozen_graph_filename))
+        with tf.gfile.GFile(frozen_graph_filename, "rb") as f:
+            graph_def = tf.GraphDef()
+            graph_def.ParseFromString(f.read())
+            tf.import_graph_def(graph_def)
+            graph = tf.get_default_graph()
+
+            # Salvataggio del grafo
+            #with tf.Session() as sess:
+                #writer = tf.summary.FileWriter('./named_scope', sess.graph)
+                #writer.close()
+
+            graph = tf.get_default_graph()
+
+            # Access the tensors
+            inputs = graph.get_tensor_by_name('import/inputs:0')
+            keep = graph.get_tensor_by_name('import/keep:0')
+            logits = graph.get_tensor_by_name('import/logits:0')
+
+            # Gather the activities
+            activities = []
+            with open("./UCIHAR/activity_labels.txt") as file:
+                for line in file:
+                    field = line.split(' ')
+                    field[1] = field[1][:-1]
+                    activities.append(field[1])
+            #print("Labels: {}\n".format(activities))
+
+            with tf.Session() as sess:
+                i=0
+                for x_t, _ in get_batches(self.X_test, [], 1):  #PRIMA: for x_t, y_t in get_batches(self.X_test, self.y_test, 1):
+                    feed = {inputs: x_t,
+                            keep: 1}
+                    classification_tensor = logits  # teoricamente -> tf.nn.softmax(logits)
+                    prediction = sess.run(classification_tensor, feed_dict=feed)
+                    index_p = np.argmax(prediction)
+                    #print("iter-{} Predicted {} -> {} | real {} -> {}".format(i,index_p,activities[index_p], np.argmax(y_t), activities[np.argmax(y_t)]))
+                    i=i+1
+
 if __name__ == "__main__":
-    tf.logging.set_verbosity(tf.logging.ERROR)
+    #tf.logging.set_verbosity(tf.logging.ERROR)
     print("--- Initializing CNN ---")
     cnn = CNN("./UCIHAR/")
-    print("--- Building Graph ---")
+
+    print("--- Building the Graph ---")
     cnn.build_graph()
-    #print("--- Training Network ---")
-    #cnn.train_network()
+
+    # print("--- Training Network ---")
+    # cnn.train_network()
+
+    print("--- Freezing the Graph ---")
+    cnn.freeze_the_graph("har")
 
     print("--- Evaluating on Test-Set ---")
     cnn.evaluate_on_test_set()
 
-    #parser = argparse.ArgumentParser()
-    #parser.add_argument("--model_dir", type=str, default="lol", help="Model folder to export")
-    #parser.add_argument("--output_node_names", type=str, default="asd",
-    #                    help="The name of the output nodes, comma separated.")
-    #args = parser.parse_args()
-    #print(args.output_node_names)
-    #freeze_graph(args.model_dir, args.output_node_names)
-    #freeze_graph("checkpoints-cnn")
+    print("\n--- Re-create the network from Frozen-Graph and test it on Test-Set ---")
+    cnn.re_create_network_from_frozen_graph("./checkpoints-cnn/frozen_model_har.pb")    #location del modello freezato
 
-def freeze_graph(model_dir, output_node_names):
-    """Extract the sub graph defined by the output nodes and convert
-    all its variables into constant
-    Args:
-        model_dir: the root folder containing the checkpoint state file
-        output_node_names: a string, containing all the output node's names,
-                            comma separated
-    """
-    if not tf.gfile.Exists(model_dir):
-        raise AssertionError(
-            "Export directory doesn't exists. Please specify an export "
-            "directory: %s" % model_dir)
-
-    if not output_node_names:
-        print("You need to supply the name of a node to --output_node_names.")
-        return -1
-
-    # We retrieve our checkpoint fullpath
-    checkpoint = tf.train.get_checkpoint_state(model_dir)
-    input_checkpoint = checkpoint.model_checkpoint_path
-
-    # We precise the file fullname of our freezed graph
-    absolute_model_dir = "/".join(input_checkpoint.split('/')[:-1])
-    output_graph = absolute_model_dir + "/frozen_model.pb"
-
-    # We clear devices to allow TensorFlow to control on which device it will load operations
-    clear_devices = True
-
-    # We start a session using a temporary fresh Graph
-    with tf.Session(graph=tf.Graph()) as sess:
-        # We import the meta graph in the current default Graph
-        saver = tf.train.import_meta_graph(input_checkpoint + '.meta', clear_devices=clear_devices)
-
-        # We restore the weights
-        saver.restore(sess, input_checkpoint)
-
-        # We use a built-in TF helper to export variables to constants
-        output_graph_def = tf.graph_util.convert_variables_to_constants(
-            sess,  # The session is used to retrieve the weights
-            tf.get_default_graph().as_graph_def(),  # The graph_def is used to retrieve the nodes
-            output_node_names.split(",")  # The output node names are used to select the usefull nodes
-        )
-
-        # Finally we serialize and dump the output graph to the filesystem
-        with tf.gfile.GFile(output_graph, "wb") as f:
-            f.write(output_graph_def.SerializeToString())
-        print("%d ops in the final graph." % len(output_graph_def.node))
-
-    return output_graph_def
+    print("--- DONE ---")
+    ''' WORKING (Ricreare la rete a partire dal .meta e il .data)
+    print("\n--- Re-create the network and test it on Test-Set ---")
+    #You find a tutorial here: https://cv-tricks.com/tensorflow-tutorial/save-restore-tensorflow-models-quick-complete-tutorial/
+    cnn.re_create_the_network_and_test()
+    '''
